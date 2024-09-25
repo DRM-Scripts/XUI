@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# VPS details and MySQL credentials
+VPS_IP="148.72.133.92"
+MYSQL_USER="gRkzgQH2nQEarnJsyxWSFePmvzZH349t"
+MYSQL_PASS="YZTMEMahk87QsuPB8ACrwG6J764cmpQY"
+M3U_URL="http://yalangurbet.com:2086/get.php?username=skyp333&password=anRQFRDc4jwSW&type=m3u_plus&output=mpegts"
+
+# Step 1: Update server and install necessary packages
+apt-get update -y
+apt-get upgrade -y
+
+# Install MySQL or MariaDB and ffmpeg (for stream checking)
+apt-get install -y mariadb-server mariadb-client ffmpeg curl nginx
+
+# Step 2: Start and secure MySQL installation
+systemctl start mariadb
+systemctl enable mariadb
+
+# Secure MySQL installation (non-interactive)
+mysql_secure_installation <<EOF
+
+Y
+$MYSQL_PASS
+$MYSQL_PASS
+Y
+Y
+Y
+Y
+EOF
+
+# Step 3: Create MySQL user and database for XUI
+mysql -u root -p$MYSQL_PASS -e "DROP USER IF EXISTS '$MYSQL_USER'@'localhost';"
+mysql -u root -p$MYSQL_PASS -e "CREATE USER '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASS';"
+mysql -u root -p$MYSQL_PASS -e "GRANT ALL PRIVILEGES ON xui_panel.* TO '$MYSQL_USER'@'localhost';"
+mysql -u root -p$MYSQL_PASS -e "FLUSH PRIVILEGES;"
+
+# Step 4: Download and install X-UI panel
+# Correct X-UI download link from GitHub
+wget -O xui_installer.sh "https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh"
+if [ $? -ne 0 ]; then
+    echo "Error downloading X-UI installer. Exiting."
+    exit 1
+fi
+chmod +x xui_installer.sh
+./xui_installer.sh
+
+# Step 5: Check if X-UI is running
+systemctl status x-ui
+if [ $? -ne 0 ]; then
+    echo "X-UI service failed to start. Check the logs for more information."
+    exit 1
+fi
+
+# Step 6: Configure XUI to connect to the MySQL database (after confirming correct path)
+if [ -f /etc/x-ui/config/database.ini ]; then
+    sed -i "s/database_user=root/database_user=$MYSQL_USER/g" /etc/x-ui/config/database.ini
+    sed -i "s/database_password=/database_password=$MYSQL_PASS/g" /etc/x-ui/config/database.ini
+else
+    echo "X-UI database configuration file not found. Skipping database configuration."
+fi
+
+# Step 7: Add M3U playlist to XUI
+curl -X POST -d "url=$M3U_URL" http://localhost:8080/api/add_playlist
+if [ $? -ne 0 ]; then
+    echo "Failed to add M3U playlist. The X-UI API is not responding."
+fi
+
+# Step 8: Check if the stream is working using ffmpeg
+ffmpeg -i "$M3U_URL" -t 5 -vcodec copy -acodec copy -f null - > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "Stream check passed: The M3U stream is working."
+else
+    echo "Stream check failed: The M3U stream is not accessible or invalid."
+fi
+
+# Step 9: Create an admin page and allow anonymous users to view it
+cat <<EOT >> /var/www/html/admin.html
+<html>
+<head><title>Admin Page</title></head>
+<body>
+    <h1>Welcome to the Admin Page</h1>
+    <p>Stream URL: $M3U_URL</p>
+</body>
+</html>
+EOT
+
+# Step 10: Modify Nginx to allow access to the admin page
+echo "location /admin {
+    root /var/www/html;
+    index admin.html;
+    allow all;
+}" >> /etc/nginx/sites-available/xui.conf
+
+# Step 11: Test Nginx configuration and restart Nginx
+nginx -t
+if [ $? -eq 0 ]; then
+    systemctl restart nginx
+else
+    echo "Nginx configuration test failed. Fix the errors before restarting."
+fi
+
+# Output the XUI panel access URL and admin page URL
+echo "XUI panel setup is complete."
+echo "Access your panel at http://$VPS_IP:8080"
+echo "Admin page available at http://$VPS_IP/admin"
